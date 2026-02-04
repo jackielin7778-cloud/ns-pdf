@@ -11,32 +11,41 @@ import zipfile
 # ==========================================
 # 1. 基本配置
 # ==========================================
-VERSION = "v1.1.4"
+VERSION = "v1.1.5-fix"
 st.set_page_config(page_title=f"Invoice API Tester {VERSION}", page_icon="🧾", layout="wide")
 
-st.title(f"🧾 電子發票 API 測試 - 版本 {VERSION}")
-
 # ==========================================
-# 2. 狀態管理
+# 2. 狀態管理 (確保在最前面執行)
 # ==========================================
-if 'logs' not in st.session_state: st.session_state.logs = []
-if 'files' not in st.session_state: st.session_state.files = []
 if 'sent' not in st.session_state: st.session_state.sent = 0
 if 'received' not in st.session_state: st.session_state.received = 0
+if 'logs' not in st.session_state: st.session_state.logs = []
+if 'files' not in st.session_state: st.session_state.files = []
 if 'total_time' not in st.session_state: st.session_state.total_time = 0.0
 
-# 頁面看板
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("已嘗試發送", st.session_state.sent)
-m2.metric("成功接收 PDF", st.session_state.received)
-m3.metric("總耗時 (秒)", f"{st.session_state.total_time:.2f} s")
-avg_time = (st.session_state.total_time / st.session_state.received) if st.session_state.received > 0 else 0
-m4.metric("平均耗時/張", f"{avg_time:.2f} s")
+# ==========================================
+# 3. 畫面標題與計數看板
+# ==========================================
+st.title(f"🧾 電子發票 API 測試 - 版本 {VERSION}")
+
+# 建立一個容器來動態更新計數器
+stats_container = st.empty()
+
+def update_stats():
+    with stats_container.container():
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("已嘗試發送", st.session_state.sent)
+        m2.metric("成功接收 PDF", st.session_state.received)
+        m3.metric("總耗時 (秒)", f"{st.session_state.total_time:.2f} s")
+        success_rate = (st.session_state.received / st.session_state.sent * 100) if st.session_state.sent > 0 else 0
+        m4.metric("成功率", f"{success_rate:.1f}%")
+
+update_stats() # 初始化顯示
 
 st.divider()
 
 # ==========================================
-# 3. 側邊欄
+# 4. 側邊欄與原始資料
 # ==========================================
 with st.sidebar:
     st.header("⚙️ 發送設定")
@@ -45,12 +54,10 @@ with st.sidebar:
     total_rounds = st.number_input("總發送次數", min_value=1, value=5)
 
     if st.button("🗑️ 歸零計數與紀錄"):
-        st.session_state.update({"sent": 0, "received": 0, "logs": [], "files": [], "total_time": 0.0})
+        for key in ['sent', 'received', 'logs', 'files', 'total_time']:
+            st.session_state[key] = [] if isinstance(st.session_state[key], list) else 0.0 if isinstance(st.session_state[key], float) else 0
         st.rerun()
 
-# ==========================================
-# 4. 原始資料
-# ==========================================
 raw_json_data = {
     "url": "",
     "payload": {
@@ -72,86 +79,80 @@ raw_json_data = {
     }
 }
 
-json_input = st.text_area("🔧 JSON Payload 編輯區：", value=json.dumps(raw_json_data, indent=2), height=400)
+json_input = st.text_area("🔧 JSON Payload 編輯區：", value=json.dumps(raw_json_data, indent=2), height=350)
 
 # ==========================================
-# 5. 發送邏輯
+# 5. 發送邏輯 (核心修正)
 # ==========================================
-if st.button("🚀 開始執行測試", use_container_width=True):
+if st.button("🚀 開始測試 (計數器即時更新)", use_container_width=True, type="primary"):
     try:
-        current_payload = json.loads(json_input)
+        payload_to_send = json.loads(json_input)
+        
+        # 抓取發票號碼
         try:
-            xml_str = base64.b64decode(current_payload["payload"]["xml"]).decode('utf-8')
-            inv_match = re.search(r'<InvoiceNumber>(.*?)</InvoiceNumber>', xml_str)
-            inv_no = inv_match.group(1) if inv_match else "Inv"
+            xml_str = base64.b64decode(payload_to_send["payload"]["xml"]).decode('utf-8')
+            inv_no = re.search(r'<InvoiceNumber>(.*?)</InvoiceNumber>', xml_str).group(1)
         except:
             inv_no = "Invoice"
 
-        compact_body = json.dumps(current_payload, separators=(',', ':'))
-        headers = {"Content-Type": "text/plain", "User-Agent": "Mozilla/5.0"}
+        compact_body = json.dumps(payload_to_send, separators=(',', ':'))
+        headers = {"Content-Type": "text/plain"}
 
         start_time = time.time()
-        progress_bar = st.progress(0)
         
-        for i in range(int(total_rounds)):
-            st.session_state.sent += 1
-            log_time = datetime.now().strftime("%H:%M:%S")
-            timestamp_file = datetime.now().strftime("%H%M%S")
+        # 使用 Status 顯示當前進度
+        with st.status("正在發送請求...", expanded=True) as status:
+            for i in range(int(total_rounds)):
+                st.session_state.sent += 1
+                
+                try:
+                    r = requests.post(target_url, data=compact_body.encode('utf-8'), headers=headers, timeout=25)
+                    if r.status_code == 200:
+                        st.session_state.received += 1
+                        fname = f"{inv_no}_{st.session_state.received}_{datetime.now().strftime('%H%M%S')}.pdf"
+                        st.session_state.files.append({"name": fname, "content": r.content})
+                        st.session_state.logs.append(f"✅ {fname} 成功")
+                    else:
+                        st.session_state.logs.append(f"❌ 第 {i+1} 次失敗: {r.status_code}")
+                except Exception as e:
+                    st.session_state.logs.append(f"⚠️ 錯誤: {str(e)}")
+                
+                # 每跑一圈就更新看板
+                st.session_state.total_time = time.time() - start_time
+                update_stats()
+                
+                if i < total_rounds - 1:
+                    time.sleep(sec_interval)
             
-            try:
-                r = requests.post(target_url, data=compact_body.encode('utf-8'), headers=headers, timeout=25)
-                if r.status_code == 200:
-                    st.session_state.received += 1
-                    file_name = f"{inv_no}_{st.session_state.received}_{timestamp_file}.pdf"
-                    st.session_state.files.append({"name": file_name, "content": r.content})
-                    st.session_state.logs.append(f"[{log_time}] ✅ 成功: {file_name}")
-                else:
-                    st.session_state.logs.append(f"[{log_time}] ❌ 失敗 ({r.status_code})")
-            except Exception as e:
-                st.session_state.logs.append(f"[{log_time}] ⚠️ 錯誤: {str(e)}")
-            
-            progress_bar.progress((i + 1) / int(total_rounds))
-            if i < total_rounds - 1:
-                time.sleep(sec_interval)
+            status.update(label="測試完成！", state="complete")
         
-        st.session_state.total_time = time.time() - start_time
-        st.rerun()
-    except:
-        st.error("JSON 格式不正確")
+        st.rerun() # 最後刷新一次確保下載區出現
+    except Exception as e:
+        st.error(f"執行發生錯誤: {e}")
 
 # ==========================================
-# 6. 下載區 (新增一鍵下載所有功能)
+# 6. 下載區與日誌 (佈局優化)
 # ==========================================
 st.divider()
-c1, c2 = st.columns(2)
+col_left, col_right = st.columns([1, 1])
 
-with c1:
-    st.subheader(f"📂 下載區 (共 {len(st.session_state.files)} 份)")
-    
+with col_left:
+    st.subheader(f"📂 下載區 ({len(st.session_state.files)})")
     if st.session_state.files:
-        # --- ZIP 打包邏輯 ---
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+        # ZIP 打包
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED, False) as zf:
             for f in st.session_state.files:
-                zip_file.writestr(f["name"], f["content"])
+                zf.writestr(f["name"], f["content"])
         
-        # 一鍵下載按鈕
-        st.download_button(
-            label="📦 下載所有 PDF (打包成 ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name=f"Invoices_Batch_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
-            mime="application/zip",
-            use_container_width=True,
-            type="primary"
-        )
-        st.write("") # 增加間距
+        st.download_button("📦 打包下載所有 PDF (ZIP)", data=buf.getvalue(), 
+                           file_name=f"Invoices_{datetime.now().strftime('%m%d%H%M')}.zip", 
+                           mime="application/zip", type="primary", use_container_width=True)
         
-        # 個別下載按鈕
-        grid = st.columns(2)
-        for idx, f in enumerate(st.session_state.files):
-            with grid[idx % 2]:
-                st.download_button(label=f"⬇️ {f['name']}", data=f['content'], file_name=f['name'], key=f"dl_{idx}")
+        # 列表顯示
+        for idx, f in enumerate(reversed(st.session_state.files)):
+            st.download_button(f"⬇️ {f['name']}", f['content'], f['name'], key=f"d_{idx}")
 
-with c2:
-    st.subheader("📜 執行日誌")
-    st.text_area("Log", "\n".join(reversed(st.session_state.logs)), height=400)
+with col_right:
+    st.subheader("📜 執行日誌 (最新在最上)")
+    st.text_area("Logs", "\n".join(reversed(st.session_state.logs)), height=400)
